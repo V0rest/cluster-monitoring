@@ -1,0 +1,206 @@
+version: '3.5'
+services:
+  vmagent:
+    container_name: vmagent
+    image: victoriametrics/vmagent
+    depends_on:
+      - "vminsert"
+    ports:
+      - 8429:8429
+    volumes:
+      - vmagent_data:/vmagentdata
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--promscrape.config=/etc/prometheus/prometheus.yml'
+      - '--remoteWrite.url=victoria-metrics-fd4c75529a67ed44.elb.us-east-1.amazonaws.com:8480/insert/0/prometheus/'
+    restart: always
+
+  nodeexporter:
+    image: prom/node-exporter:v1.3.1
+    container_name: nodeexporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    ports:
+      - 9100:9100
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.43.0
+    container_name: cadvisor
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro
+    restart: unless-stopped
+    ports:
+      - 8080:8080
+
+  prometheus:
+    image: prom/prometheus:v2.32.1
+    container_name: prometheus
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=24h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    ports:
+      - 9090:9090
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:8.3.4
+    depends_on:
+      - "vmselect"
+    ports:
+      - 3000:3000
+    restart: always
+    volumes:
+      - ./grafana/config.ini:/etc/grafana/grafana.ini
+      - grafana_data:/var/lib/grafana
+##      - ./provisioning/:/etc/grafana/provisioning/
+##      - ./provisioning/dashboards/victoriametrics.json:/var/lib/grafana/dashboards/vm.json
+##      - ./provisioning/dashboards/vmagent.json:/var/lib/grafana/dashboards/vmagent.json
+##     - ./provisioning/dashboards/vmalert.json:/var/lib/grafana/dashboards/vmalert.json
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+
+#  yace-clouwatch-exporter:
+#    container_name: YACE
+#    image: quay.io/invisionag/yet-another-cloudwatch-exporter:v0.19.1-alpha
+# #   networks:
+##      - prometheus
+#    ports:
+#      - 5000:5000
+#    volumes:
+#      - ./yace/config.yaml:/tmp/config.yml:ro
+#    restart: unless-stopped
+
+  vmstorage-1:
+    container_name: vmstorage-1
+    image: victoriametrics/vmstorage
+    ports:
+      - 8482:8482
+      - 8400:8400
+      - 8401:8401
+    volumes:
+      - /mnt/efs/fs1:/storage
+    command:
+      - '--storageDataPath=/storage'
+      - '--dedup.minScrapeInterval=1ms'
+#      - '--replicationFactor=3'
+    restart: always
+
+#  vmstorage-2:
+#    container_name: vmstorage-2
+#    image: victoriametrics/vmstorage
+#    ports:
+#      - 8482:8482
+#      - 8400:8400
+#      - 8401:8401
+#    volumes:
+#      - /mnt/efs/fs2:/storage
+#    command:
+#      - '--storageDataPath=/storage'
+#      - '--dedup.minScrapeInterval=1ms'
+#    restart: always
+
+#  vmstorage-3:
+#    container_name: vmstorage-3
+#    image: victoriametrics/vmstorage
+#    ports:
+#      - 8482:8482
+#      - 8400:8400
+#      - 8401:8401
+#    volumes:
+#      - /mnt/efs/fs3:/storage
+#    command:
+#      - '--storageDataPath=/storage'
+#      - '--dedup.minScrapeInterval=1ms'
+#    restart: always
+
+  vminsert:
+    container_name: vminsert
+    image: victoriametrics/vminsert
+    depends_on:
+      - "vmstorage-1"
+  #    - "vmstorage-2"
+    command:
+      - '--storageNode=vmstorage-1:8400'
+      - '--storageNode=172.31.81.215:8400'
+#      - '--storageNode=52.45.180.1224:8400'
+#      - '--replicationFactor=3'
+    ports:
+      - 8480:8480
+    restart: always
+
+
+  vmselect:
+    container_name: vmselect
+    image: victoriametrics/vmselect
+    depends_on:
+      - "vmstorage-1"
+#      - "vmstorage-2"
+    command:
+      - '--storageNode=vmstorage-1:8401'
+      - '--storageNode=172.31.81.215:8401'
+#      - '--storageNode=52.45.180.122:8401'
+#      - '--replicationFactor=3'
+      - '--dedup.minScrapeInterval=1ms'
+    ports:
+      - 8481:8481
+    restart: always
+
+  vmalert:
+    container_name: vmalert
+    image: victoriametrics/vmalert
+    depends_on:
+      - "vmselect"
+    ports:
+      - 8880:8880
+    volumes:
+      - ./alerts.yml:/etc/alerts/alerts.yml
+    command:
+      - '--datasource.url=victoria-metrics-fd4c75529a67ed44.elb.us-east-1.amazonaws.com:8481/select/0/prometheus'
+      - '--remoteRead.url=victoria-metrics-fd4c75529a67ed44.elb.us-east-1.amazonaws.com:8481/select/0/prometheus'
+      - '--remoteWrite.url=victoria-metrics-fd4c75529a67ed44.elb.us-east-1.amazonaws.com:8480/insert/0/prometheus'
+      - '--notifier.url=alertmanager:9093/'
+      - '--rule=/etc/alerts/*.yml'
+      # display source of alerts in grafana
+  #    - '-external.url=http://127.0.0.1:3000' #grafana outside container
+      # when copypaste the line below be aware of '$$' for escaping in '$expr'
+      - '--external.alert.source=explore?orgId=1&left=["now-1h","now","VictoriaMetrics",{"expr":"{{$$expr|quotesEscape|crlfEscape|queryEscape}}"},{"mode":"Metrics"},{"ui":[true,true,true,"none"]}]'
+    restart: always
+
+  alertmanager:
+    container_name: alertmanager
+    image:  prom/alertmanager
+    volumes:
+      - ./alertmanager.yml:/config/alertmanager.yml
+    command:
+      - '--config.file=/config/alertmanager.yml'
+    ports:
+      - 9093:9093
+    restart: always
+
+volumes:
+#  vmagent_data: {}
+  grafana_data: {}
+  prometheus_data: {}
